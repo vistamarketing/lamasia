@@ -1,18 +1,21 @@
 // ... (imports remain the same, ensure all necessary icons are imported)
 import React, { useState, useEffect, createContext, useContext, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
-import { 
-  Trophy, Calendar, Users, Shield, Star, LogOut, 
-  ChevronRight, Plus, Save, Trash2, Award, Activity, Lock, 
+import {
+  Trophy, Calendar, Users, Shield, Star, LogOut,
+  ChevronRight, Plus, Save, Trash2, Award, Activity, Lock,
   User as UserIcon, Settings, List, UserPlus, Filter, X, Bell, Mail, Info, CheckCheck
 } from 'lucide-react';
+import { auth, db } from './src/firebase';
+import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
+import { collection, onSnapshot, addDoc, updateDoc, doc, deleteDoc, setDoc, query, where } from 'firebase/firestore';
 
 // --- CONSTANTS ---
-const LOGO_URL = "https://scontent-mad1-1.cdninstagram.com/v/t51.2885-19/252059309_908364953126705_2493429692667000299_n.jpg?efg=eyJ2ZW5jb2RlX3RhZyI6InByb2ZpbGVfcGljLmRqYW5nby42MjYuYzIifQ&_nc_ht=scontent-mad1-1.cdninstagram.com&_nc_cat=105&_nc_oc=Q6cZ2QHwpDfAbYxN0leuc1P1o03fOc-YqNQJVvBfP_mw2KHp0kRd1CSApv4SGbTr_DZ7hTsu9MpaD-ZxCSA5-EkIrTFi&_nc_ohc=9xWOx9jmPlQQ7kNvwEyUIUT&_nc_gid=d-BMw44wHY0iqHwCwlxRTA&edm=APoiHPcBAAAA&ccb=7-5&oh=00_Afo3EjxX_wnWCjf2NFFPGF9Jrmd4BK394PYv80UnULJrdA&oe=6962D47F&_nc_sid=22de04";
+const LOGO_URL = "/logo.png";
 
 const TEAM_COLORS = [
-  'bg-red-600', 'bg-blue-600', 'bg-green-600', 'bg-yellow-500', 
-  'bg-purple-600', 'bg-pink-500', 'bg-indigo-600', 'bg-orange-500', 
+  'bg-red-600', 'bg-blue-600', 'bg-green-600', 'bg-yellow-500',
+  'bg-purple-600', 'bg-pink-500', 'bg-indigo-600', 'bg-orange-500',
   'bg-cyan-600', 'bg-slate-800', 'bg-emerald-500', 'bg-rose-500'
 ];
 
@@ -51,13 +54,13 @@ interface MatchStats {
   awayScore: number;
   scorers: { playerId: string; count: number }[];
   mvpPlayerId?: string;
-  summary?: string; 
+  summary?: string;
   isPlayed: boolean;
 }
 
 interface Match {
   id: string;
-  matchDay: number; 
+  matchDay: number;
   date: string;
   category: Category;
   homeTeamId: string;
@@ -132,9 +135,9 @@ const INITIAL_PLAYERS: Player[] = [
 
 interface AppContextType {
   user: User | null;
-  login: (email: string) => void;
+  login: (email: string, password: string) => Promise<void>;
   logout: () => void;
-  register: (email: string, name: string) => void;
+  register: (email: string, password: string, name: string) => Promise<void>;
   users: User[];
   teams: Team[];
   matches: Match[];
@@ -159,57 +162,73 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(() => {
-    const saved = localStorage.getItem('currentUser');
-    return saved ? JSON.parse(saved) : null;
-  });
+  const [user, setUser] = useState<User | null>(null);
 
   const [activeView, setActiveView] = useState<ViewState>('matches');
 
-  const [users, setUsers] = useState<User[]>(() => {
-    const saved = localStorage.getItem('users');
-    return saved ? JSON.parse(saved) : INITIAL_USERS;
-  });
-
-  const [teams, setTeams] = useState<Team[]>(() => {
-    const saved = localStorage.getItem('teams');
-    return saved ? JSON.parse(saved) : INITIAL_TEAMS;
-  });
-  
-  const [matches, setMatches] = useState<Match[]>(() => {
-    const saved = localStorage.getItem('matches');
-    return saved ? JSON.parse(saved) : INITIAL_MATCHES;
-  });
-
-  const [players, setPlayers] = useState<Player[]>(() => {
-    const saved = localStorage.getItem('players');
-    return saved ? JSON.parse(saved) : INITIAL_PLAYERS;
-  });
-
-  const [notifications, setNotifications] = useState<Notification[]>(() => {
-    const saved = localStorage.getItem('notifications');
-    return saved ? JSON.parse(saved) : [{
-        id: 'welcome',
-        userId: 'all',
-        title: '¡Bienvenido!',
-        message: 'Bienvenido a la app oficial del torneo.',
-        date: new Date().toISOString(),
-        read: false,
-        type: 'info'
-    }];
-  });
-
+  const [users, setUsers] = useState<User[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [matches, setMatches] = useState<Match[]>([]);
+  const [players, setPlayers] = useState<Player[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<Category>('MASCULINO');
 
-  useEffect(() => localStorage.setItem('users', JSON.stringify(users)), [users]);
-  useEffect(() => localStorage.setItem('teams', JSON.stringify(teams)), [teams]);
-  useEffect(() => localStorage.setItem('matches', JSON.stringify(matches)), [matches]);
-  useEffect(() => localStorage.setItem('players', JSON.stringify(players)), [players]);
-  useEffect(() => localStorage.setItem('notifications', JSON.stringify(notifications)), [notifications]);
+  // Firebase Auth Listener
   useEffect(() => {
-    if (user) localStorage.setItem('currentUser', JSON.stringify(user));
-    else localStorage.removeItem('currentUser');
-  }, [user]);
+    let unsubUser: (() => void) | null = null;
+
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser) {
+        // Fetch user data from Firestore
+        unsubUser = onSnapshot(doc(db, "users", firebaseUser.uid), (docSnapshot) => {
+          if (docSnapshot.exists()) {
+            setUser({ id: docSnapshot.id, ...docSnapshot.data() } as User);
+          } else {
+            // User exists in Auth but not in Firestore (should fix inconsistency)
+            // We can create a default profile or logout.
+            // For now, let's create a default profile to fix the "locked out" issue
+            const newUser = { email: firebaseUser.email || '', name: firebaseUser.displayName || 'Usuario', role: 'player' };
+            setDoc(doc(db, "users", firebaseUser.uid), newUser).then(() => {
+              console.log("Recovered missing user profile");
+            });
+          }
+        }, (error) => {
+          console.error("Error fetching user data:", error);
+        });
+      } else {
+        if (unsubUser) unsubUser();
+        setUser(null);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      if (unsubUser) unsubUser();
+    };
+  }, []);
+
+  // Data Listeners
+  useEffect(() => {
+    const unsubTeams = onSnapshot(collection(db, "teams"), (snapshot) => {
+      setTeams(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Team)));
+    });
+    const unsubMatches = onSnapshot(collection(db, "matches"), (snapshot) => {
+      setMatches(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Match)));
+    });
+    const unsubPlayers = onSnapshot(collection(db, "players"), (snapshot) => {
+      setPlayers(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Player)));
+    });
+    const unsubNotifs = onSnapshot(collection(db, "notifications"), (snapshot) => {
+      setNotifications(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Notification))
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
+    });
+    return () => {
+      unsubTeams();
+      unsubMatches();
+      unsubPlayers();
+      unsubNotifs();
+    };
+  }, []);
 
   // Reset view on login/logout
   useEffect(() => {
@@ -223,9 +242,8 @@ const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     }
   }, []);
 
-  const sendNotification = (userId: string | 'all', title: string, message: string, type: 'info' | 'success' | 'warning' = 'info') => {
-    const newNotif: Notification = {
-      id: Date.now().toString(),
+  const sendNotification = async (userId: string | 'all', title: string, message: string, type: 'info' | 'success' | 'warning' = 'info') => {
+    const newNotif = {
       userId,
       title,
       message,
@@ -233,98 +251,97 @@ const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       read: false,
       type
     };
-    setNotifications(prev => [newNotif, ...prev]);
+    await addDoc(collection(db, "notifications"), newNotif);
 
-    // Native Browser Push Notification Simulation
     if ("Notification" in window && Notification.permission === "granted") {
-       // Filter if it's for this user or all
-       if (userId === 'all' || (user && user.id === userId)) {
-         new Notification(title, { body: message, icon: LOGO_URL });
-       }
+      if (userId === 'all' || (user && user.id === userId)) {
+        new Notification(title, { body: message, icon: LOGO_URL });
+      }
     }
   };
 
-  const login = (email: string) => {
-    const found = users.find(u => u.email.toLowerCase() === email.toLowerCase());
-    if (found) {
-      setUser(found);
-      sendNotification(found.id, 'Inicio de Sesión', `Hola ${found.name}, has iniciado sesión correctamente.`);
+  const login = async (email: string, password: string) => {
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+    } catch (e: any) {
+      console.error("Login Error:", e);
+      alert('Error en inicio de sesión: ' + e.message);
     }
-    else alert('Usuario no encontrado');
   };
 
-  const register = (email: string, name: string) => {
-    if (users.find(u => u.email === email)) {
-      alert('El email ya existe');
-      return;
+  const register = async (email: string, password: string, name: string) => {
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email, password);
+      // create user doc
+      const newUser = { email, name, role: 'player' };
+      await setDoc(doc(db, "users", cred.user.uid), newUser);
+      await sendNotification(cred.user.uid, 'Registro Exitoso', 'Gracias por registrarte en La Masía F&C.');
+    } catch (e: any) {
+      alert('Error en registro: ' + e.message);
     }
-    const newUser: User = { id: Date.now().toString(), email, name, role: 'player' };
-    setUsers([...users, newUser]);
-    setUser(newUser);
-    sendNotification(newUser.id, 'Registro Exitoso', 'Gracias por registrarte en La Masía F&C.');
   };
 
   const logout = () => {
-    setUser(null);
+    signOut(auth);
     setActiveView('matches');
   };
 
   const updateMatch = async (matchId: string, stats: MatchStats) => {
     const updatedStats = { ...stats, summary: undefined };
-    setMatches(prev => prev.map(m => m.id === matchId ? { ...m, stats: updatedStats } : m));
-    
+    await updateDoc(doc(db, "matches", matchId), { stats: updatedStats });
+
     // Notify all users about match result
     if (stats.isPlayed) {
-        const match = matches.find(m => m.id === matchId);
-        const home = teams.find(t => t.id === match?.homeTeamId);
-        const away = teams.find(t => t.id === match?.awayTeamId);
-        if (home && away) {
-            sendNotification('all', 'Resultado Final', `${home.name} (${stats.homeScore}) - (${stats.awayScore}) ${away.name}`, 'success');
-        }
+      const match = matches.find(m => m.id === matchId);
+      const home = teams.find(t => t.id === match?.homeTeamId);
+      const away = teams.find(t => t.id === match?.awayTeamId);
+      if (home && away) {
+        sendNotification('all', 'Resultado Final', `${home.name} (${stats.homeScore}) - (${stats.awayScore}) ${away.name}`, 'success');
+      }
     }
   };
 
-  const updateUserRole = (userId: string, role: Role, teamId?: string) => {
-    setUsers(prev => prev.map(u => u.id === userId ? { ...u, role, teamId } : u));
+  const updateUserRole = async (userId: string, role: Role, teamId?: string) => {
+    const data: any = { role };
+    if (teamId !== undefined) data.teamId = teamId;
+    await updateDoc(doc(db, "users", userId), data);
+
     const u = users.find(us => us.id === userId);
     if (u) {
-        sendNotification(userId, 'Rol Actualizado', `Tu rol ha sido actualizado a ${role.toUpperCase()}.`, 'warning');
+      sendNotification(userId, 'Rol Actualizado', `Tu rol ha sido actualizado a ${role.toUpperCase()}.`, 'warning');
     }
   };
 
-  const addPlayer = (name: string, number: number, teamId: string) => {
-    const newPlayer: Player = {
-      id: Date.now().toString(),
+  const addPlayer = async (name: string, number: number, teamId: string) => {
+    const newPlayer = {
       name,
       number,
       teamId,
       goals: 0
     };
-    setPlayers(prev => [...prev, newPlayer]);
+    await addDoc(collection(db, "players"), newPlayer);
   };
 
-  const removePlayer = (playerId: string) => {
-    setPlayers(prev => prev.filter(p => p.id !== playerId));
+  const removePlayer = async (playerId: string) => {
+    await deleteDoc(doc(db, "players", playerId));
   };
 
-  const addTeam = (name: string, category: Category, logoColor: string) => {
-    const newTeam: Team = {
-      id: `t-${Date.now()}`,
+  const addTeam = async (name: string, category: Category, logoColor: string) => {
+    const newTeam = {
       name,
       category,
       logoColor
     };
-    setTeams([...teams, newTeam]);
-    sendNotification('all', 'Nuevo Equipo', `Se ha inscrito el equipo ${name} en ${category.replace('_', ' ')}`);
+    await addDoc(collection(db, "teams"), newTeam);
+    await sendNotification('all', 'Nuevo Equipo', `Se ha inscrito el equipo ${name} en ${category.replace('_', ' ')}`);
   };
 
-  const deleteTeam = (teamId: string) => {
-    setTeams(teams.filter(t => t.id !== teamId));
+  const deleteTeam = async (teamId: string) => {
+    await deleteDoc(doc(db, "teams", teamId));
   };
 
-  const addMatch = (matchDay: number, date: string, category: Category, homeTeamId: string, awayTeamId: string) => {
-    const newMatch: Match = {
-      id: `m-${Date.now()}`,
+  const addMatch = async (matchDay: number, date: string, category: Category, homeTeamId: string, awayTeamId: string) => {
+    const newMatch = {
       matchDay,
       date,
       category,
@@ -332,15 +349,15 @@ const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       awayTeamId,
       stats: { homeScore: 0, awayScore: 0, scorers: [], isPlayed: false }
     };
-    setMatches([...matches, newMatch]);
+    await addDoc(collection(db, "matches"), newMatch);
   };
 
-  const deleteMatch = (matchId: string) => {
-    setMatches(matches.filter(m => m.id !== matchId));
+  const deleteMatch = async (matchId: string) => {
+    await deleteDoc(doc(db, "matches", matchId));
   };
 
-  const markAsRead = (notificationId: string) => {
-      setNotifications(prev => prev.map(n => n.id === notificationId ? { ...n, read: true } : n));
+  const markAsRead = async (notificationId: string) => {
+    await updateDoc(doc(db, "notifications", notificationId), { read: true });
   };
 
   return (
@@ -369,7 +386,7 @@ const useAppContext = () => {
 
 const Header = () => {
   const { user, notifications, activeView, setActiveView } = useAppContext();
-  
+
   const unreadCount = notifications.filter(n => (n.userId === 'all' || n.userId === user?.id) && !n.read).length;
 
   return (
@@ -379,29 +396,29 @@ const Header = () => {
           <img src={LOGO_URL} alt="La Masía F&C Logo" className="w-9 h-9 rounded-full object-cover border border-slate-700 shadow-glow" />
           <span className="font-bold text-lg tracking-tight">LA MASÍA F&C</span>
         </div>
-        
+
         {user && (
           <div className="flex items-center gap-4">
-             {/* Notification Bell */}
-             <button 
-                onClick={() => setActiveView('notifications')} 
-                className={`relative transition-colors ${activeView === 'notifications' ? 'text-white' : 'text-slate-400 hover:text-slate-200'}`}
-             >
-                <Bell size={22} className={activeView === 'notifications' ? 'fill-current' : ''} />
-                {unreadCount > 0 && (
-                    <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 rounded-full border-2 border-slate-900 flex items-center justify-center text-[9px] font-bold text-white shadow-sm">{unreadCount}</span>
-                )}
-             </button>
+            {/* Notification Bell */}
+            <button
+              onClick={() => setActiveView('notifications')}
+              className={`relative transition-colors ${activeView === 'notifications' ? 'text-white' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              <Bell size={22} className={activeView === 'notifications' ? 'fill-current' : ''} />
+              {unreadCount > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 rounded-full border-2 border-slate-900 flex items-center justify-center text-[9px] font-bold text-white shadow-sm">{unreadCount}</span>
+              )}
+            </button>
 
-             {/* Profile Avatar */}
-             <button 
-                onClick={() => setActiveView('profile')} 
-                className={`w-8 h-8 rounded-full border-2 flex items-center justify-center transition-all overflow-hidden ${activeView === 'profile' ? 'border-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.4)]' : 'border-slate-600 hover:border-slate-400'}`}
-             >
-               <div className="w-full h-full bg-slate-800 flex items-center justify-center">
-                 <span className="text-xs font-bold text-slate-200">{user.name.charAt(0).toUpperCase()}</span>
-               </div>
-             </button>
+            {/* Profile Avatar */}
+            <button
+              onClick={() => setActiveView('profile')}
+              className={`w-8 h-8 rounded-full border-2 flex items-center justify-center transition-all overflow-hidden ${activeView === 'profile' ? 'border-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.4)]' : 'border-slate-600 hover:border-slate-400'}`}
+            >
+              <div className="w-full h-full bg-slate-800 flex items-center justify-center">
+                <span className="text-xs font-bold text-slate-200">{user.name.charAt(0).toUpperCase()}</span>
+              </div>
+            </button>
           </div>
         )}
       </div>
@@ -411,7 +428,7 @@ const Header = () => {
 
 const CategoryTabs = () => {
   const { selectedCategory, setSelectedCategory, activeView } = useAppContext();
-  
+
   // Hide category tabs if in profile or notifications view to reduce clutter
   if (activeView === 'profile' || activeView === 'notifications') return null;
 
@@ -422,9 +439,8 @@ const CategoryTabs = () => {
           <button
             key={cat}
             onClick={() => setSelectedCategory(cat)}
-            className={`px-4 py-2 rounded-full text-xs font-bold whitespace-nowrap transition-all shadow-sm flex-shrink-0 ${
-              selectedCategory === cat ? 'bg-slate-900 text-white ring-2 ring-slate-900 ring-offset-1' : 'bg-slate-100 text-slate-600 border border-slate-200'
-            }`}
+            className={`px-4 py-2 rounded-full text-xs font-bold whitespace-nowrap transition-all shadow-sm flex-shrink-0 ${selectedCategory === cat ? 'bg-slate-900 text-white ring-2 ring-slate-900 ring-offset-1' : 'bg-slate-100 text-slate-600 border border-slate-200'
+              }`}
           >
             {cat.replace('_', ' ')}
           </button>
@@ -478,23 +494,23 @@ const NotificationsView = () => {
 
       <div className="space-y-3">
         {myNotifications.length === 0 && (
-           <div className="text-center py-16 text-slate-400">
-              <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-3">
-                <Bell size={32} className="opacity-20" />
-              </div>
-              <p className="text-sm font-medium">No tienes notificaciones</p>
-           </div>
+          <div className="text-center py-16 text-slate-400">
+            <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-3">
+              <Bell size={32} className="opacity-20" />
+            </div>
+            <p className="text-sm font-medium">No tienes notificaciones</p>
+          </div>
         )}
         {myNotifications.map(n => (
-          <div 
-            key={n.id} 
+          <div
+            key={n.id}
             onClick={() => markAsRead(n.id)}
             className={`p-4 rounded-xl border transition-all cursor-pointer relative overflow-hidden ${n.read ? 'bg-white border-slate-100 text-slate-500' : 'bg-white border-blue-200 shadow-md shadow-blue-50'}`}
           >
             {!n.read && <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-500"></div>}
             <div className="flex justify-between items-start mb-1.5 pl-2">
-               <h4 className={`font-bold text-sm ${n.read ? 'text-slate-600' : 'text-slate-900'}`}>{n.title}</h4>
-               <span className="text-[10px] text-slate-400 whitespace-nowrap ml-2">{new Date(n.date).toLocaleDateString()}</span>
+              <h4 className={`font-bold text-sm ${n.read ? 'text-slate-600' : 'text-slate-900'}`}>{n.title}</h4>
+              <span className="text-[10px] text-slate-400 whitespace-nowrap ml-2">{new Date(n.date).toLocaleDateString()}</span>
             </div>
             <p className="text-xs leading-relaxed pl-2 text-slate-600">{n.message}</p>
           </div>
@@ -513,12 +529,12 @@ const StandingsView = () => {
     const stats = categoryTeams.map(team => {
       let played = 0, won = 0, drawn = 0, lost = 0, gf = 0, gc = 0;
       matches.filter(m => m.isPlayed && m.category === selectedCategory && (m.homeTeamId === team.id || m.awayTeamId === team.id)).forEach(m => {
-          const isHome = m.homeTeamId === team.id;
-          const myScore = isHome ? m.stats.homeScore : m.stats.awayScore;
-          const oppScore = isHome ? m.stats.awayScore : m.stats.homeScore;
-          played++; gf += myScore; gc += oppScore;
-          if (myScore > oppScore) won++; else if (myScore < oppScore) lost++; else drawn++;
-        });
+        const isHome = m.homeTeamId === team.id;
+        const myScore = isHome ? m.stats.homeScore : m.stats.awayScore;
+        const oppScore = isHome ? m.stats.awayScore : m.stats.homeScore;
+        played++; gf += myScore; gc += oppScore;
+        if (myScore > oppScore) won++; else if (myScore < oppScore) lost++; else drawn++;
+      });
       const points = (won * 3) + (drawn * 1);
       const diff = gf - gc;
       return { team, played, won, drawn, lost, gf, gc, diff, points };
@@ -591,10 +607,10 @@ const MatchesView = () => {
     <div className="p-4 pb-24 space-y-4">
       {sortedDays.length > 0 && (
         <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide mb-2">
-           <button onClick={() => setFilterDay('all')} className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase transition-colors whitespace-nowrap ${filterDay === 'all' ? 'bg-slate-800 text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>Todos</button>
-           {sortedDays.map(day => (
-             <button key={day} onClick={() => setFilterDay(day)} className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase transition-colors whitespace-nowrap ${filterDay === day ? 'bg-slate-800 text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>Fecha {day}</button>
-           ))}
+          <button onClick={() => setFilterDay('all')} className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase transition-colors whitespace-nowrap ${filterDay === 'all' ? 'bg-slate-800 text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>Todos</button>
+          {sortedDays.map(day => (
+            <button key={day} onClick={() => setFilterDay(day)} className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase transition-colors whitespace-nowrap ${filterDay === day ? 'bg-slate-800 text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>Fecha {day}</button>
+          ))}
         </div>
       )}
 
@@ -606,7 +622,7 @@ const MatchesView = () => {
               const home = teams.find(t => t.id === match.homeTeamId);
               const away = teams.find(t => t.id === match.awayTeamId);
               const date = new Date(match.date);
-              
+
               const homeScorers = match.stats.scorers?.filter(s => {
                 const p = players.find(pl => pl.id === s.playerId);
                 return p && p.teamId === match.homeTeamId;
@@ -626,17 +642,17 @@ const MatchesView = () => {
                   <div className="p-4">
                     <div className="flex items-center justify-between relative z-10">
                       <div className="flex-1 flex flex-col items-center gap-1">
-                        <div className={`w-10 h-10 rounded-full ${home?.logoColor} flex items-center justify-center text-white font-bold text-lg shadow-sm`}>{home?.name.substring(0,1)}</div>
+                        <div className={`w-10 h-10 rounded-full ${home?.logoColor} flex items-center justify-center text-white font-bold text-lg shadow-sm`}>{home?.name.substring(0, 1)}</div>
                         <span className="text-xs font-bold text-center leading-tight line-clamp-2 h-8 flex items-center">{home?.name}</span>
                       </div>
                       <div className="px-3 flex flex-col items-center">
                         {match.stats.isPlayed ? (
                           <div className="text-2xl font-black text-slate-800 tracking-tight bg-slate-100 px-3 py-1 rounded-lg">{match.stats.homeScore}-{match.stats.awayScore}</div>
                         ) : (<span className="text-sm font-bold text-slate-300 bg-slate-50 px-2 py-1 rounded">VS</span>)}
-                        <div className="text-[10px] text-slate-400 mt-1 font-medium">{date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+                        <div className="text-[10px] text-slate-400 mt-1 font-medium">{date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
                       </div>
                       <div className="flex-1 flex flex-col items-center gap-1">
-                        <div className={`w-10 h-10 rounded-full ${away?.logoColor} flex items-center justify-center text-white font-bold text-lg shadow-sm`}>{away?.name.substring(0,1)}</div>
+                        <div className={`w-10 h-10 rounded-full ${away?.logoColor} flex items-center justify-center text-white font-bold text-lg shadow-sm`}>{away?.name.substring(0, 1)}</div>
                         <span className="text-xs font-bold text-center leading-tight line-clamp-2 h-8 flex items-center">{away?.name}</span>
                       </div>
                     </div>
@@ -644,16 +660,16 @@ const MatchesView = () => {
                       <div className="grid grid-cols-2 gap-4 mt-4 pt-3 border-t border-slate-50">
                         <div className="flex flex-col gap-1.5 items-start pl-2">
                           {homeScorers.map(s => {
-                             const p = players.find(pl => pl.id === s.playerId);
-                             if (!p) return null;
-                             return (<div key={s.playerId} className="flex items-center gap-1.5 text-[11px] text-slate-600 font-medium"><span>⚽</span> <span>{p.name} {s.count > 1 && <span className="text-slate-400">({s.count})</span>}</span></div>)
+                            const p = players.find(pl => pl.id === s.playerId);
+                            if (!p) return null;
+                            return (<div key={s.playerId} className="flex items-center gap-1.5 text-[11px] text-slate-600 font-medium"><span>⚽</span> <span>{p.name} {s.count > 1 && <span className="text-slate-400">({s.count})</span>}</span></div>)
                           })}
                         </div>
                         <div className="flex flex-col gap-1.5 items-end pr-2">
                           {awayScorers.map(s => {
-                             const p = players.find(pl => pl.id === s.playerId);
-                             if (!p) return null;
-                             return (<div key={s.playerId} className="flex items-center gap-1.5 text-[11px] text-slate-600 font-medium"><span>{p.name} {s.count > 1 && <span className="text-slate-400">({s.count})</span>}</span> <span>⚽</span></div>)
+                            const p = players.find(pl => pl.id === s.playerId);
+                            if (!p) return null;
+                            return (<div key={s.playerId} className="flex items-center gap-1.5 text-[11px] text-slate-600 font-medium"><span>{p.name} {s.count > 1 && <span className="text-slate-400">({s.count})</span>}</span> <span>⚽</span></div>)
                           })}
                         </div>
                       </div>
@@ -680,7 +696,7 @@ const MatchEditorModal = ({ match, onClose }: { match: Match, onClose: () => voi
   const { updateMatch, teams, players } = useAppContext();
   const [loading, setLoading] = useState(false);
   const [stats, setStats] = useState<MatchStats>({ ...match.stats, scorers: match.stats.scorers || [] });
-  
+
   const homePlayers = players.filter(p => p.teamId === match.homeTeamId);
   const awayPlayers = players.filter(p => p.teamId === match.awayTeamId);
   const allMatchPlayers = [...homePlayers, ...awayPlayers];
@@ -720,42 +736,42 @@ const MatchEditorModal = ({ match, onClose }: { match: Match, onClose: () => voi
           <div className="flex justify-between items-start gap-4">
             <div className="flex flex-col items-center gap-2 flex-1">
               <span className="text-xs font-bold text-slate-500 uppercase truncate w-full text-center">{home?.name}</span>
-              <input type="number" inputMode="numeric" min="0" value={stats.homeScore} onChange={e => setStats({...stats, homeScore: parseInt(e.target.value) || 0})} className="w-16 h-16 text-3xl text-center font-black border-2 border-slate-200 rounded-2xl focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/20 outline-none transition-all" />
+              <input type="number" inputMode="numeric" min="0" value={stats.homeScore} onChange={e => setStats({ ...stats, homeScore: parseInt(e.target.value) || 0 })} className="w-16 h-16 text-3xl text-center font-black border-2 border-slate-200 rounded-2xl focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/20 outline-none transition-all" />
               <div className="w-full space-y-1 mt-1">
                 {stats.scorers?.map(s => {
                   const p = homePlayers.find(hp => hp.id === s.playerId);
                   if (!p) return null;
                   return (
                     <div key={s.playerId} className="flex justify-between items-center text-xs bg-slate-50 px-2 py-1 rounded border border-slate-100">
-                       <span className="font-medium truncate max-w-[80px]">{p.name} {s.count > 1 && `x${s.count}`}</span>
-                       <button onClick={() => handleGoalChange(s.playerId, -1)} className="text-red-400 hover:text-red-600"><Trash2 size={12} /></button>
+                      <span className="font-medium truncate max-w-[80px]">{p.name} {s.count > 1 && `x${s.count}`}</span>
+                      <button onClick={() => handleGoalChange(s.playerId, -1)} className="text-red-400 hover:text-red-600"><Trash2 size={12} /></button>
                     </div>
                   );
                 })}
                 <select className="w-full text-[10px] p-2 bg-slate-100 rounded-lg border-transparent focus:bg-white focus:border-slate-300 outline-none font-bold text-slate-500 text-center uppercase tracking-wide cursor-pointer hover:bg-slate-200 transition-colors" value="" onChange={(e) => handleGoalChange(e.target.value, 1)}>
-                   <option value="">+ Gol</option>
-                   {homePlayers.map(p => <option key={p.id} value={p.id}>{p.number}. {p.name}</option>)}
+                  <option value="">+ Gol</option>
+                  {homePlayers.map(p => <option key={p.id} value={p.id}>{p.number}. {p.name}</option>)}
                 </select>
               </div>
             </div>
             <span className="text-xl font-bold text-slate-300 pt-6">-</span>
             <div className="flex flex-col items-center gap-2 flex-1">
               <span className="text-xs font-bold text-slate-500 uppercase truncate w-full text-center">{away?.name}</span>
-              <input type="number" inputMode="numeric" min="0" value={stats.awayScore} onChange={e => setStats({...stats, awayScore: parseInt(e.target.value) || 0})} className="w-16 h-16 text-3xl text-center font-black border-2 border-slate-200 rounded-2xl focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/20 outline-none transition-all" />
+              <input type="number" inputMode="numeric" min="0" value={stats.awayScore} onChange={e => setStats({ ...stats, awayScore: parseInt(e.target.value) || 0 })} className="w-16 h-16 text-3xl text-center font-black border-2 border-slate-200 rounded-2xl focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/20 outline-none transition-all" />
               <div className="w-full space-y-1 mt-1">
                 {stats.scorers?.map(s => {
                   const p = awayPlayers.find(hp => hp.id === s.playerId);
                   if (!p) return null;
                   return (
                     <div key={s.playerId} className="flex justify-between items-center text-xs bg-slate-50 px-2 py-1 rounded border border-slate-100">
-                       <span className="font-medium truncate max-w-[80px]">{p.name} {s.count > 1 && `x${s.count}`}</span>
-                       <button onClick={() => handleGoalChange(s.playerId, -1)} className="text-red-400 hover:text-red-600"><Trash2 size={12} /></button>
+                      <span className="font-medium truncate max-w-[80px]">{p.name} {s.count > 1 && `x${s.count}`}</span>
+                      <button onClick={() => handleGoalChange(s.playerId, -1)} className="text-red-400 hover:text-red-600"><Trash2 size={12} /></button>
                     </div>
                   );
                 })}
                 <select className="w-full text-[10px] p-2 bg-slate-100 rounded-lg border-transparent focus:bg-white focus:border-slate-300 outline-none font-bold text-slate-500 text-center uppercase tracking-wide cursor-pointer hover:bg-slate-200 transition-colors" value="" onChange={(e) => handleGoalChange(e.target.value, 1)}>
-                   <option value="">+ Gol</option>
-                   {awayPlayers.map(p => <option key={p.id} value={p.id}>{p.number}. {p.name}</option>)}
+                  <option value="">+ Gol</option>
+                  {awayPlayers.map(p => <option key={p.id} value={p.id}>{p.number}. {p.name}</option>)}
                 </select>
               </div>
             </div>
@@ -763,7 +779,7 @@ const MatchEditorModal = ({ match, onClose }: { match: Match, onClose: () => voi
           <div>
             <label className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1 uppercase tracking-wide"><Star size={14} className="text-yellow-500 fill-current" /> MVP del Partido</label>
             <div className="relative">
-              <select value={stats.mvpPlayerId || ''} onChange={e => setStats({...stats, mvpPlayerId: e.target.value})} className="w-full p-3 pl-4 border border-slate-200 rounded-xl bg-slate-50 text-sm font-medium appearance-none outline-none focus:ring-2 focus:ring-blue-500">
+              <select value={stats.mvpPlayerId || ''} onChange={e => setStats({ ...stats, mvpPlayerId: e.target.value })} className="w-full p-3 pl-4 border border-slate-200 rounded-xl bg-slate-50 text-sm font-medium appearance-none outline-none focus:ring-2 focus:ring-blue-500">
                 <option value="">Seleccionar Jugador Destacado</option>
                 {allMatchPlayers.map(p => (<option key={p.id} value={p.id}>{p.name} (#{p.number})</option>))}
               </select>
@@ -801,7 +817,7 @@ const TeamView = () => {
   return (
     <div className="p-4 pb-24 space-y-4">
       <div className="bg-white rounded-xl shadow-sm border p-4 flex items-center gap-3">
-        <div className={`w-12 h-12 rounded-full ${team?.logoColor} flex items-center justify-center text-white font-bold text-xl`}>{team?.name.substring(0,1)}</div>
+        <div className={`w-12 h-12 rounded-full ${team?.logoColor} flex items-center justify-center text-white font-bold text-xl`}>{team?.name.substring(0, 1)}</div>
         <div><h2 className="font-bold text-lg text-slate-900">{team?.name}</h2><p className="text-xs text-slate-500 uppercase font-medium">{team?.category.replace('_', ' ')}</p></div>
       </div>
       {isCaptain && (
@@ -831,7 +847,7 @@ const TeamView = () => {
 const ProfileView = () => {
   const { user, users, teams, matches, notifications, updateUserRole, addTeam, deleteTeam, addMatch, deleteMatch, logout } = useAppContext();
   const [activeTab, setActiveTab] = useState<'info' | 'admin'>('info');
-  
+
   // Teams State
   const [newTeamName, setNewTeamName] = useState('');
   const [newTeamCategory, setNewTeamCategory] = useState<Category>('MASCULINO');
@@ -872,71 +888,71 @@ const ProfileView = () => {
     <div className="p-4 pb-24 space-y-4">
       {/* Profile Header */}
       <div className="bg-white p-6 rounded-2xl shadow-sm border text-center">
-         <div className="w-20 h-20 bg-slate-900 rounded-full mx-auto mb-3 flex items-center justify-center text-white shadow-lg ring-4 ring-slate-50">
-           <UserIcon size={32} />
-         </div>
-         <h2 className="font-bold text-xl text-slate-900">{user.name}</h2>
-         <p className="text-slate-500 text-sm">{user.email}</p>
-         <div className="mt-3 flex justify-center gap-2">
-           <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-100 text-slate-600`}>
-             {user.role}
-           </span>
-         </div>
+        <div className="w-20 h-20 bg-slate-900 rounded-full mx-auto mb-3 flex items-center justify-center text-white shadow-lg ring-4 ring-slate-50">
+          <UserIcon size={32} />
+        </div>
+        <h2 className="font-bold text-xl text-slate-900">{user.name}</h2>
+        <p className="text-slate-500 text-sm">{user.email}</p>
+        <div className="mt-3 flex justify-center gap-2">
+          <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-100 text-slate-600`}>
+            {user.role}
+          </span>
+        </div>
       </div>
 
       {/* Main Tabs (Only for Owners or if we add more tabs later) */}
       {user.role === 'owner' && (
         <div className="flex bg-slate-200 p-1 rounded-xl">
-           <button onClick={() => setActiveTab('info')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1 ${activeTab === 'info' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>
-              <Info size={14} /> DATOS
-           </button>
-           <button onClick={() => setActiveTab('admin')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1 ${activeTab === 'admin' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>
-              <Lock size={14} /> ADMIN
-           </button>
+          <button onClick={() => setActiveTab('info')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1 ${activeTab === 'info' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>
+            <Info size={14} /> DATOS
+          </button>
+          <button onClick={() => setActiveTab('admin')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1 ${activeTab === 'admin' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>
+            <Lock size={14} /> ADMIN
+          </button>
         </div>
       )}
 
       {activeTab === 'info' && (
         <div className="space-y-4">
-           <div className="bg-white p-4 rounded-xl border shadow-sm space-y-4">
-               <h3 className="font-bold text-slate-800 text-sm border-b pb-2">Información Personal</h3>
-               <div className="space-y-3 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">ID Usuario</span>
-                    <span className="font-mono text-xs text-slate-400">{user.id}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Email</span>
-                    <span className="font-medium text-slate-800">{user.email}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Rol Actual</span>
-                    <span className="font-bold text-slate-800 uppercase">{user.role}</span>
-                  </div>
-                  {user.teamId && (
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Equipo</span>
-                      <span className="font-medium text-emerald-600">{teams.find(t => t.id === user.teamId)?.name}</span>
-                    </div>
-                  )}
-               </div>
-           </div>
-           
-           <button 
-             onClick={logout}
-             className="w-full py-4 bg-red-50 text-red-600 font-bold rounded-xl active:scale-95 transition-transform flex items-center justify-center gap-2 border border-red-100 hover:bg-red-100"
-           >
-             <LogOut size={18} /> Cerrar Sesión
-           </button>
+          <div className="bg-white p-4 rounded-xl border shadow-sm space-y-4">
+            <h3 className="font-bold text-slate-800 text-sm border-b pb-2">Información Personal</h3>
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between">
+                <span className="text-slate-500">ID Usuario</span>
+                <span className="font-mono text-xs text-slate-400">{user.id}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Email</span>
+                <span className="font-medium text-slate-800">{user.email}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Rol Actual</span>
+                <span className="font-bold text-slate-800 uppercase">{user.role}</span>
+              </div>
+              {user.teamId && (
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Equipo</span>
+                  <span className="font-medium text-emerald-600">{teams.find(t => t.id === user.teamId)?.name}</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <button
+            onClick={logout}
+            className="w-full py-4 bg-red-50 text-red-600 font-bold rounded-xl active:scale-95 transition-transform flex items-center justify-center gap-2 border border-red-100 hover:bg-red-100"
+          >
+            <LogOut size={18} /> Cerrar Sesión
+          </button>
         </div>
       )}
 
       {activeTab === 'admin' && user.role === 'owner' && (
         <div>
           <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide mb-4">
-             <button onClick={() => setAdminSubTab('users')} className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase whitespace-nowrap border ${adminSubTab === 'users' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200'}`}>Usuarios</button>
-             <button onClick={() => setAdminSubTab('teams')} className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase whitespace-nowrap border ${adminSubTab === 'teams' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200'}`}>Equipos</button>
-             <button onClick={() => setAdminSubTab('matches')} className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase whitespace-nowrap border ${adminSubTab === 'matches' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200'}`}>Partidos</button>
+            <button onClick={() => setAdminSubTab('users')} className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase whitespace-nowrap border ${adminSubTab === 'users' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200'}`}>Usuarios</button>
+            <button onClick={() => setAdminSubTab('teams')} className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase whitespace-nowrap border ${adminSubTab === 'teams' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200'}`}>Equipos</button>
+            <button onClick={() => setAdminSubTab('matches')} className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase whitespace-nowrap border ${adminSubTab === 'matches' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200'}`}>Partidos</button>
           </div>
 
           {/* Admin Sub-Tabs Content (Reused from previous AdminView logic) */}
@@ -949,12 +965,11 @@ const ProfileView = () => {
                       <div className="font-bold text-sm text-slate-900">{u.name}</div>
                       <div className="text-xs text-slate-500">{u.email}</div>
                     </div>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                      u.role === 'owner' ? 'bg-black text-white' :
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${u.role === 'owner' ? 'bg-black text-white' :
                       u.role === 'manager' ? 'bg-purple-100 text-purple-800' :
-                      u.role === 'captain' ? 'bg-blue-100 text-blue-800' :
-                      'bg-slate-100 text-slate-600'
-                    }`}>{u.role}</span>
+                        u.role === 'captain' ? 'bg-blue-100 text-blue-800' :
+                          'bg-slate-100 text-slate-600'
+                      }`}>{u.role}</span>
                   </div>
                   {u.id !== user.id && (
                     <div className="grid grid-cols-2 gap-2 pt-2 border-t mt-2">
@@ -979,100 +994,100 @@ const ProfileView = () => {
 
           {adminSubTab === 'teams' && (
             <div className="space-y-6">
-               <div className="bg-white p-4 rounded-xl border shadow-sm">
-                 <h3 className="font-bold text-sm text-slate-900 mb-3">Nuevo Equipo</h3>
-                 <form onSubmit={handleAddTeam} className="space-y-3">
-                    <input placeholder="Nombre del Equipo" value={newTeamName} onChange={e => setNewTeamName(e.target.value)} className="w-full p-2.5 text-sm border rounded-lg bg-slate-50" required />
-                    <select value={newTeamCategory} onChange={(e) => setNewTeamCategory(e.target.value as Category)} className="w-full p-2.5 text-sm border rounded-lg bg-slate-50">
-                      <option value="MASCULINO">Masculino</option>
-                      <option value="FEMENINO_A">Femenino A</option>
-                      <option value="FEMENINO_B">Femenino B</option>
-                    </select>
-                    <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
-                      {TEAM_COLORS.map(c => (
-                        <button type="button" key={c} onClick={() => setNewTeamColor(c)} className={`w-8 h-8 rounded-full flex-shrink-0 ${c} ${newTeamColor === c ? 'ring-2 ring-offset-2 ring-slate-900' : ''}`} />
-                      ))}
+              <div className="bg-white p-4 rounded-xl border shadow-sm">
+                <h3 className="font-bold text-sm text-slate-900 mb-3">Nuevo Equipo</h3>
+                <form onSubmit={handleAddTeam} className="space-y-3">
+                  <input placeholder="Nombre del Equipo" value={newTeamName} onChange={e => setNewTeamName(e.target.value)} className="w-full p-2.5 text-sm border rounded-lg bg-slate-50" required />
+                  <select value={newTeamCategory} onChange={(e) => setNewTeamCategory(e.target.value as Category)} className="w-full p-2.5 text-sm border rounded-lg bg-slate-50">
+                    <option value="MASCULINO">Masculino</option>
+                    <option value="FEMENINO_A">Femenino A</option>
+                    <option value="FEMENINO_B">Femenino B</option>
+                  </select>
+                  <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                    {TEAM_COLORS.map(c => (
+                      <button type="button" key={c} onClick={() => setNewTeamColor(c)} className={`w-8 h-8 rounded-full flex-shrink-0 ${c} ${newTeamColor === c ? 'ring-2 ring-offset-2 ring-slate-900' : ''}`} />
+                    ))}
+                  </div>
+                  <button className="w-full bg-slate-900 text-white py-2.5 rounded-lg text-sm font-bold">Crear Equipo</button>
+                </form>
+              </div>
+
+              <div className="space-y-2">
+                {teams.map(t => (
+                  <div key={t.id} className="flex items-center justify-between p-3 bg-white border rounded-xl">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-8 h-8 rounded-full ${t.logoColor} flex items-center justify-center text-white font-bold text-xs`}>{t.name.substring(0, 1)}</div>
+                      <div>
+                        <div className="font-bold text-sm">{t.name}</div>
+                        <div className="text-[10px] text-slate-500">{t.category}</div>
+                      </div>
                     </div>
-                    <button className="w-full bg-slate-900 text-white py-2.5 rounded-lg text-sm font-bold">Crear Equipo</button>
-                 </form>
-               </div>
-               
-               <div className="space-y-2">
-                 {teams.map(t => (
-                   <div key={t.id} className="flex items-center justify-between p-3 bg-white border rounded-xl">
-                     <div className="flex items-center gap-3">
-                       <div className={`w-8 h-8 rounded-full ${t.logoColor} flex items-center justify-center text-white font-bold text-xs`}>{t.name.substring(0,1)}</div>
-                       <div>
-                         <div className="font-bold text-sm">{t.name}</div>
-                         <div className="text-[10px] text-slate-500">{t.category}</div>
-                       </div>
-                     </div>
-                     <button onClick={() => deleteTeam(t.id)} className="text-red-400 hover:text-red-600 p-2"><Trash2 size={16} /></button>
-                   </div>
-                 ))}
-               </div>
+                    <button onClick={() => deleteTeam(t.id)} className="text-red-400 hover:text-red-600 p-2"><Trash2 size={16} /></button>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
           {adminSubTab === 'matches' && (
             <div className="space-y-6">
-               <div className="bg-white p-4 rounded-xl border shadow-sm">
-                 <h3 className="font-bold text-sm text-slate-900 mb-3">Nuevo Partido</h3>
-                 <form onSubmit={handleAddMatch} className="space-y-3">
-                    <div className="flex gap-2">
-                      <div className="flex-1">
-                        <label className="text-[10px] font-bold text-slate-500 uppercase">Categoría</label>
-                        <select value={newMatchCategory} onChange={(e) => setNewMatchCategory(e.target.value as Category)} className="w-full p-2 text-sm border rounded-lg bg-slate-50">
-                          <option value="MASCULINO">Masculino</option>
-                          <option value="FEMENINO_A">Femenino A</option>
-                          <option value="FEMENINO_B">Femenino B</option>
-                        </select>
-                      </div>
-                      <div className="w-20">
-                         <label className="text-[10px] font-bold text-slate-500 uppercase">Fecha #</label>
-                         <input type="number" min="1" value={newMatchDay} onChange={e => setNewMatchDay(parseInt(e.target.value))} className="w-full p-2 text-sm border rounded-lg bg-slate-50 text-center" />
-                      </div>
+              <div className="bg-white p-4 rounded-xl border shadow-sm">
+                <h3 className="font-bold text-sm text-slate-900 mb-3">Nuevo Partido</h3>
+                <form onSubmit={handleAddMatch} className="space-y-3">
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <label className="text-[10px] font-bold text-slate-500 uppercase">Categoría</label>
+                      <select value={newMatchCategory} onChange={(e) => setNewMatchCategory(e.target.value as Category)} className="w-full p-2 text-sm border rounded-lg bg-slate-50">
+                        <option value="MASCULINO">Masculino</option>
+                        <option value="FEMENINO_A">Femenino A</option>
+                        <option value="FEMENINO_B">Femenino B</option>
+                      </select>
+                    </div>
+                    <div className="w-20">
+                      <label className="text-[10px] font-bold text-slate-500 uppercase">Fecha #</label>
+                      <input type="number" min="1" value={newMatchDay} onChange={e => setNewMatchDay(parseInt(e.target.value))} className="w-full p-2 text-sm border rounded-lg bg-slate-50 text-center" />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">Día y Hora</label>
+                    <input type="datetime-local" value={newMatchDate} onChange={e => setNewMatchDate(e.target.value)} className="w-full p-2 text-sm border rounded-lg bg-slate-50" required />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-500 uppercase">Local</label>
+                      <select value={newMatchHome} onChange={e => setNewMatchHome(e.target.value)} className="w-full p-2 text-xs border rounded-lg bg-slate-50" required>
+                        <option value="">Seleccionar</option>
+                        {filteredTeamsForMatch.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                      </select>
                     </div>
                     <div>
-                       <label className="text-[10px] font-bold text-slate-500 uppercase">Día y Hora</label>
-                       <input type="datetime-local" value={newMatchDate} onChange={e => setNewMatchDate(e.target.value)} className="w-full p-2 text-sm border rounded-lg bg-slate-50" required />
+                      <label className="text-[10px] font-bold text-slate-500 uppercase">Visitante</label>
+                      <select value={newMatchAway} onChange={e => setNewMatchAway(e.target.value)} className="w-full p-2 text-xs border rounded-lg bg-slate-50" required>
+                        <option value="">Seleccionar</option>
+                        {filteredTeamsForMatch.filter(t => t.id !== newMatchHome).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                      </select>
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
-                       <div>
-                         <label className="text-[10px] font-bold text-slate-500 uppercase">Local</label>
-                         <select value={newMatchHome} onChange={e => setNewMatchHome(e.target.value)} className="w-full p-2 text-xs border rounded-lg bg-slate-50" required>
-                           <option value="">Seleccionar</option>
-                           {filteredTeamsForMatch.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                         </select>
-                       </div>
-                       <div>
-                         <label className="text-[10px] font-bold text-slate-500 uppercase">Visitante</label>
-                         <select value={newMatchAway} onChange={e => setNewMatchAway(e.target.value)} className="w-full p-2 text-xs border rounded-lg bg-slate-50" required>
-                           <option value="">Seleccionar</option>
-                           {filteredTeamsForMatch.filter(t => t.id !== newMatchHome).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                         </select>
-                       </div>
-                    </div>
-                    <button className="w-full bg-slate-900 text-white py-2.5 rounded-lg text-sm font-bold">Programar Partido</button>
-                 </form>
-               </div>
+                  </div>
+                  <button className="w-full bg-slate-900 text-white py-2.5 rounded-lg text-sm font-bold">Programar Partido</button>
+                </form>
+              </div>
 
-               <div className="space-y-2">
-                 <h3 className="font-bold text-sm text-slate-900 px-1">Últimos Partidos</h3>
-                 {matches.slice().reverse().slice(0, 10).map(m => {
-                   const h = teams.find(t => t.id === m.homeTeamId);
-                   const a = teams.find(t => t.id === m.awayTeamId);
-                   return (
-                     <div key={m.id} className="bg-white p-3 rounded-xl border shadow-sm flex items-center justify-between">
-                        <div className="flex-1">
-                          <div className="text-[10px] font-bold text-slate-400 mb-1">FECHA {m.matchDay} • {m.category}</div>
-                          <div className="text-xs font-semibold">{h?.name} vs {a?.name}</div>
-                        </div>
-                        <button onClick={() => deleteMatch(m.id)} className="text-red-400 hover:text-red-600 p-2"><Trash2 size={16} /></button>
-                     </div>
-                   )
-                 })}
-               </div>
+              <div className="space-y-2">
+                <h3 className="font-bold text-sm text-slate-900 px-1">Últimos Partidos</h3>
+                {matches.slice().reverse().slice(0, 10).map(m => {
+                  const h = teams.find(t => t.id === m.homeTeamId);
+                  const a = teams.find(t => t.id === m.awayTeamId);
+                  return (
+                    <div key={m.id} className="bg-white p-3 rounded-xl border shadow-sm flex items-center justify-between">
+                      <div className="flex-1">
+                        <div className="text-[10px] font-bold text-slate-400 mb-1">FECHA {m.matchDay} • {m.category}</div>
+                        <div className="text-xs font-semibold">{h?.name} vs {a?.name}</div>
+                      </div>
+                      <button onClick={() => deleteMatch(m.id)} className="text-red-400 hover:text-red-600 p-2"><Trash2 size={16} /></button>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
           )}
         </div>
@@ -1086,12 +1101,13 @@ const AuthScreen = () => {
   const { login, register } = useAppContext();
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [name, setName] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isLogin) login(email);
-    else register(email, name);
+    if (isLogin) login(email, password);
+    else register(email, password, name);
   };
 
   return (
@@ -1099,12 +1115,12 @@ const AuthScreen = () => {
       <div className="w-full max-w-sm">
         <div className="text-center mb-10">
           <div className="mx-auto mb-6 w-24 h-24 relative group">
-             <div className="absolute inset-0 bg-yellow-500 rounded-full blur-lg opacity-20 group-hover:opacity-40 transition-opacity"></div>
-             <img 
-               src={LOGO_URL} 
-               className="relative w-24 h-24 rounded-full object-cover border-4 border-slate-800 shadow-2xl transform transition-transform group-hover:scale-105" 
-               alt="La Masía F&C Logo" 
-             />
+            <div className="absolute inset-0 bg-yellow-500 rounded-full blur-lg opacity-20 group-hover:opacity-40 transition-opacity"></div>
+            <img
+              src={LOGO_URL}
+              className="relative w-24 h-24 rounded-full object-cover border-4 border-slate-800 shadow-2xl transform transition-transform group-hover:scale-105"
+              alt="La Masía F&C Logo"
+            />
           </div>
           <h1 className="text-3xl font-black text-white tracking-tight">La Masía F&C</h1>
           <p className="text-slate-400 mt-2 font-medium">Gestión deportiva inteligente</p>
@@ -1114,7 +1130,7 @@ const AuthScreen = () => {
           {!isLogin && (
             <div>
               <label className="block text-xs font-bold text-slate-300 mb-1.5 ml-1">NOMBRE</label>
-              <input 
+              <input
                 className="w-full p-3.5 bg-slate-800 border border-slate-700 text-white rounded-xl focus:ring-2 focus:ring-yellow-500 focus:border-transparent outline-none transition-all placeholder:text-slate-600"
                 placeholder="Ej. Lionel Messi"
                 value={name}
@@ -1125,12 +1141,23 @@ const AuthScreen = () => {
           )}
           <div>
             <label className="block text-xs font-bold text-slate-300 mb-1.5 ml-1">EMAIL</label>
-            <input 
+            <input
               type="email"
               className="w-full p-3.5 bg-slate-800 border border-slate-700 text-white rounded-xl focus:ring-2 focus:ring-yellow-500 focus:border-transparent outline-none transition-all placeholder:text-slate-600"
               placeholder="tu@email.com"
               value={email}
               onChange={e => setEmail(e.target.value)}
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-300 mb-1.5 ml-1">CONTRASEÑA</label>
+            <input
+              type="password"
+              className="w-full p-3.5 bg-slate-800 border border-slate-700 text-white rounded-xl focus:ring-2 focus:ring-yellow-500 focus:border-transparent outline-none transition-all placeholder:text-slate-600"
+              placeholder="••••••••"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
               required
             />
           </div>
@@ -1140,17 +1167,17 @@ const AuthScreen = () => {
         </form>
 
         <div className="mt-8 text-center">
-          <button 
+          <button
             onClick={() => setIsLogin(!isLogin)}
             className="text-yellow-500 text-sm font-semibold hover:text-yellow-400 transition-colors"
           >
             {isLogin ? 'Crear nueva cuenta' : 'Ya tengo cuenta'}
           </button>
         </div>
-        
+
         <div className="mt-12 text-center">
-             <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Acceso Demo</div>
-             <button onClick={() => login('admin@torneo.com')} className="text-xs text-slate-400 underline decoration-slate-600">Entrar como Dueño</button>
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Acceso Demo</div>
+          <button onClick={() => login('admin@torneo.com', '123456')} className="text-xs text-slate-400 underline decoration-slate-600">Entrar como Dueño</button>
         </div>
       </div>
     </div>
@@ -1168,7 +1195,7 @@ const Dashboard = () => {
     <div className="min-h-screen bg-slate-100 font-sans text-slate-900">
       <Header />
       <CategoryTabs />
-      
+
       <main className="max-w-md mx-auto min-h-[calc(100vh-120px)]">
         {activeView === 'matches' && <MatchesView />}
         {activeView === 'standings' && <StandingsView />}
